@@ -13,7 +13,7 @@ DEFAULT_DTYPE = torch.float
 class AnglePrior(nn.Module):
     def __init__(self, dtype=torch.float32, **kwargs):
         super(AnglePrior, self).__init__()
-        
+
         #TODO: Check the indices from SMPLX
         # Indices for the roration angle of
         # 55: left elbow,  90deg bend at -np.pi/2
@@ -47,7 +47,7 @@ class L2Prior(nn.Module):
 
 class MaxMixturePrior(nn.Module):
 
-    def __init__(self, prior_folder='data/dataset/SPIN/data',
+    def __init__(self, prior_folder,
                  num_gaussians=8, device='cuda', dtype=DEFAULT_DTYPE, epsilon=1e-16,
                  use_merged=True,
                  **kwargs):

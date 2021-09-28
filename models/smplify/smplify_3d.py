@@ -22,7 +22,7 @@ class FittingLoop(object):
                  model_type='smplx',
                  **kwargs):
         super(FittingLoop, self).__init__()
-        
+
         self.summary_steps = summary_steps
         self.visualize = visualize
         self.maxiters = maxiters
@@ -38,8 +38,8 @@ class FittingLoop(object):
     def __exit__(self, exception_type, exception_value, traceback):
         pass
 
-    def run_optimization(self, optimizer, closure, 
-                         params, body_model, use_vposer=True, 
+    def run_optimization(self, optimizer, closure,
+                         params, body_model, use_vposer=True,
                          pose_embedding=None, vposer=None, stage=None,
                          **kwargs):
 
@@ -48,7 +48,7 @@ class FittingLoop(object):
 
         # with tqdm(total=self.maxiters, leave=False) as prog_bar:
             # for n in range(self.maxiters):
-        
+
         if stage is not None and stage >= 2:
             maxiters = self.maxiters * 2
         else:
@@ -58,17 +58,17 @@ class FittingLoop(object):
             for n in range(maxiters):
                 loss = optimizer.step(closure)
 
-                if (torch.isnan(loss).sum() > 0 and 
+                if (torch.isnan(loss).sum() > 0 and
                     torch.isinf(loss).sum() > 0):
                     print("Inappropriate loss value, break the loop !")
                     break
-                
+
                 # Firt convergence criterion
                 if self.ftol > 0 and n > 0:
                     rel_loss_change_ = rel_loss_change(prev_loss, loss.item())
                     if rel_loss_change_ < self.ftol:
                         break
-                
+
                 # Second convergence criterion
                 if all([torch.abs(var.grad.view(-1).max()).item() < self.gtol
                         for var in params if var.grad is not None]):
@@ -84,31 +84,30 @@ class FittingLoop(object):
 
     def create_fitting_closure(self,
                                optimizer, body_model,
-                               gt_joints=None, 
+                               gt_joints=None,
                                ign_joint_idx=None,
                                loss=None,
                                joint_conf=None,
-                               use_vposer=True, 
-                               pose_embedding=None, 
+                               use_vposer=True,
+                               pose_embedding=None,
                                vposer=None,
                                create_graph=False,
-                               return_verts=True, 
+                               return_verts=True,
                                return_full_pose=True,
-                               optim_type='pose',
                                **kwargs):
-        
+
         def loss_function(backward=True):
             if backward:
                 optimizer.zero_grad()
-            
+
             body_pose = vposer.decode(
                 pose_embedding, output_type='aa').view(
                     1, -1) if use_vposer else pose_embedding
-            
+
             body_model_output = body_model(return_verts=return_verts,
                                            body_pose=body_pose,
                                            return_full_pose=return_full_pose)
-            
+
             total_loss = loss(body_model_output,
                               gt_joints=gt_joints,
                               ign_joint_idx=ign_joint_idx,
@@ -116,11 +115,10 @@ class FittingLoop(object):
                               pose_embedding=pose_embedding,
                               use_vposer=use_vposer,
                               vposer=vposer,
-                              optim_type=optim_type,
-                              **kwargs)            
+                              **kwargs)
             if backward:
                 total_loss.backward(create_graph=create_graph)
-            
+
             self.steps += 1
 
             return total_loss
@@ -129,18 +127,19 @@ class FittingLoop(object):
 
 
 class SMPLify3D(nn.Module):
-    def __init__(self, 
+    def __init__(self,
                  joint_regressor,
                  model_folder,
                  batch_size,
+                 prior_pth,
                  pred_rotmat=False,
                  vposer=None,
                  use_vposer=False,
-                 joint_dist_weights=None, 
-                 body_pose_prior_weights=None, 
-                 shape_prior_weight=None, 
+                 joint_dist_weights=None,
+                 body_pose_prior_weights=None,
+                 shape_prior_weight=None,
                  optimizer_type = 'adam',
-                 maxiters=100, 
+                 maxiters=100,
                  ftol=0,
                  gtol=0,
                  rho=100,
@@ -151,10 +150,11 @@ class SMPLify3D(nn.Module):
                  device='cuda'):
 
         super(SMPLify3D, self).__init__()
-        
+
         self.shape_prior = L2Prior(dtype=dtype)
         self.angle_prior = AnglePrior(dtype=dtype)
-        self.body_pose_prior = vposer if (use_vposer) and vposer is not None else MaxMixturePrior(dtype=dtype)
+        self.body_pose_prior = vposer if (use_vposer) and vposer is not None \
+            else MaxMixturePrior(prior_pth, dtype=dtype)
 
         self.joint_regressor = joint_regressor
         self.model_folder = model_folder
@@ -190,10 +190,11 @@ class SMPLify3D(nn.Module):
         self.dtype = dtype
         self.device = device
 
-    def run_smplify(self, pred_pose, pred_betas, pred_global_orient, gt_joints, batch_size,
-                    optim_types=['pose'], body_segments_length=None, **kwargs):
-        
-        loss_function = build_loss_function(rho=self.rho, 
+    def run_smplify(self, body_model, pred_pose, pred_betas, pred_global_orient,
+                    gt_joints, batch_size, body_segments_length=None, **kwargs):
+
+        loss_function = build_loss_function(rho=self.rho,
+                                            joint_regressor=self.joint_regressor,
                                             body_segments_idx=self.body_segments_idx,
                                             body_pose_prior=self.body_pose_prior,
                                             shape_prior=self.shape_prior,
@@ -211,83 +212,70 @@ class SMPLify3D(nn.Module):
         opt_weights = [dict(zip(keys, vals)) for vals in
                     zip(*(opt_weights_dict[k] for k in keys
                     if opt_weights_dict[k] is not None))]
-        
+
         for weight_list in opt_weights:
             for key in weight_list:
                 weight_list[key] = torch.tensor(weight_list[key],
                                                 device=self.device,
                                                 dtype=self.dtype)
-        
+
         if gt_joints.shape[-1] == 4:
             joint_conf = gt_joints[:, :, -1]
             gt_joints = gt_joints[:, :, :-1]
         else:
             joint_conf = torch.ones(*gt_joints.shape[:-1]).to(device=self.device, dtype=self.dtype)
-        
-        body_model = SMPL(self.joint_regressor, 
-                          self.model_folder,
-                          batch_size=self.batch_size,
-                          create_body_pose=(not self.use_vposer),
-                          pose2rot=(not self.pred_rotmat)).to(self.device)
-        
+
         pose_embedding = None
-        
+
         with FittingLoop(maxiters=self.maxiters, ftol=self.ftol, **kwargs) as floop:
             body_model.reset_params(betas=pred_betas, body_pose=pred_pose, global_orient=pred_global_orient)
 
-            for optim_type in optim_types:
-                for open_idx, curr_weights in enumerate(opt_weights):
-                    if optim_type == 'shape':
-                        optim_params = [body_model.betas]
-                        final_params = list(filter(lambda x: x.requires_grad, optim_params))
-                    
-                    else:
-                        if (not self.use_vposer) or self.vposer is None:
-                            optim_params = [body_model.betas, body_model.body_pose, body_model.global_orient]
-                        else:
-                            optim_params = [body_model.betas, body_model.global_orient]
+            for open_idx, curr_weights in enumerate(opt_weights):
+                if (not self.use_vposer) or self.vposer is None:
+                    optim_params = [body_model.betas, body_model.body_pose, body_model.global_orient]
+                else:
+                    optim_params = [body_model.betas, body_model.global_orient]
 
-                        final_params = list(filter(lambda x: x.requires_grad, optim_params))
-                        if (self.use_vposer and self.vposer is not None):
-                            pose_embedding = torch.zeros([batch_size, 32],
-                                        dtype=self.dtype, device=self.device,
-                                        requires_grad=True)
-                            with torch.no_grad():
-                                pose_embedding.fill_(0)
-                            final_params.append(pose_embedding)
+                final_params = list(filter(lambda x: x.requires_grad, optim_params))
+                if (self.use_vposer and self.vposer is not None):
+                    pose_embedding = torch.zeros([batch_size, 32],
+                                dtype=self.dtype, device=self.device,
+                                requires_grad=True)
+                    with torch.no_grad():
+                        pose_embedding.fill_(0)
+                    final_params.append(pose_embedding)
 
-                    optimizer, _ = optim_factory.create_optimizer(final_params, optim_type=self.optimizer_type, lr=self.lr)
+                optimizer, _ = optim_factory.create_optimizer(final_params, optim_type=self.optimizer_type, lr=self.lr)
 
-                    optimizer.zero_grad()
-                    loss_function.reset_loss_weights(curr_weights)
+                optimizer.zero_grad()
+                loss_function.reset_loss_weights(curr_weights)
 
-                    closure = floop.create_fitting_closure(optimizer=optimizer,
-                                                           body_model=body_model,
-                                                           gt_joints=gt_joints,
-                                                           loss=loss_function,
-                                                           joint_conf=joint_conf,
-                                                           use_vposer=self.use_vposer,
-                                                           pose_embedding=pose_embedding,
-                                                           vposer=self.vposer,
-                                                           optim_type=optim_type,
-                                                           create_graph=False)
+                closure = floop.create_fitting_closure(optimizer=optimizer,
+                                                        body_model=body_model,
+                                                        gt_joints=gt_joints,
+                                                        loss=loss_function,
+                                                        joint_conf=joint_conf,
+                                                        use_vposer=self.use_vposer,
+                                                        pose_embedding=pose_embedding,
+                                                        vposer=self.vposer,
+                                                        create_graph=False)
 
-                    loss = floop.run_optimization(optimizer=optimizer,
-                                                  closure=closure,
-                                                  params=final_params,
-                                                  body_model=body_model,
-                                                  use_vposer=self.use_vposer,
-                                                  pose_embedding=pose_embedding,
-                                                  vposer=self.vposer,
-                                                  stage=open_idx)
+                loss = floop.run_optimization(optimizer=optimizer,
+                                                closure=closure,
+                                                params=final_params,
+                                                body_model=body_model,
+                                                use_vposer=self.use_vposer,
+                                                pose_embedding=pose_embedding,
+                                                vposer=self.vposer,
+                                                stage=open_idx)
 
         output = [body_model.body_pose] if (not self.use_vposer) or self.vposer is None else pose_embedding
         output = output + [body_model.betas, body_model.global_orient]
 
         return output
 
-    def forward(self, pred_pose, pred_betas, pred_global_orient, 
-                body_model, gt_joints, use_precal_smplify, 
+    def forward(self, pred_pose, pred_betas, pred_global_orient,
+                body_model, gt_joints, use_precal_smplify,
                 prediction, batch, device, dtype, **kwargs):
 
         batch_size = pred_pose.shape[0]
@@ -295,7 +283,7 @@ class SMPLify3D(nn.Module):
             opt_pose = torch.from_numpy(batch['smplify_pose']).to(device=device, dtype=dtype)
             opt_betas = torch.from_numpy(batch['smplify_shape']).to(device=device, dtype=dtype)
             opt_global_orient = torch.from_numpy(batch['smplify_global_orient']).to(device=device, dtype=dtype)
-            
+
         else:
             integrated_pose = torch.cat([pred_global_orient.detach(), pred_pose.detach()], dim=1)
             pred_pose_hom = torch.cat([integrated_pose.detach().view(-1, 3, 3).detach(), torch.tensor([0,0,1], dtype=dtype,
@@ -306,26 +294,22 @@ class SMPLify3D(nn.Module):
             opt_init_global_orient = pred_pose_euler[:, :3].detach()
 
             opt_init_betas = pred_betas.detach()
-            opt_pose, opt_betas, opt_global_orient = self.run_smplify(
+            opt_pose, opt_betas, opt_global_orient = self.run_smplify(body_model,
                 opt_init_pose, opt_init_betas, opt_init_global_orient, gt_joints,
                 batch_size=batch_size)
-        
+
         return opt_pose, opt_betas, opt_global_orient
 
 
 
-def build_smplify3d(cfg, batch_size=None):
-    model_folder = cfg.SMPL.ROOT_PTH
-    model_type = cfg.SMPL.TYPE
-    model_folder = os.path.join(model_folder, model_type)
-    
-    if batch_size is None:
-        batch_size = cfg.TRAIN.BATCH_SIZE
-    
-    return SMPLify3D(joint_regressor=cfg.SMPL.JOINT_REGRESSOR_TRAIN_EXTRA,
+def build_smplify3d(args):
+    model_folder = args.model_fldr
+
+    return SMPLify3D(joint_regressor=args.regressor,
                      model_folder=model_folder,
-                     batch_size=cfg.TRAIN.BATCH_SIZE,
-                     lr=cfg.SMPLIFY.LR,
+                     batch_size=args.batch_size,
+                     prior_pth=args.prior_pth,
+                     lr=args.lr,
                      pred_rotmat=False,
-                     maxiters=cfg.SMPLIFY.MAXITERS,
-                     optimizer_type=cfg.SMPLIFY.OPTIMIZER_TYPE)
+                     maxiters=args.maxiters,
+                     optimizer_type=args.optim_type)
